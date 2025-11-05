@@ -56,12 +56,14 @@ def build_wall_mask(bg_surf):
 
 def rect_hits_wall(rect, mask):
     """玩家的矩形跟草垛有没有撞上"""
-    # Ensure coordinates are within bounds
-    if not (0 <= rect.left < mask.get_size()[0] and 0 <= rect.top < mask.get_size()[1]):
-        return False
-
-    for y in range(max(0, rect.top), min(mask.get_size()[1], rect.bottom)):
-        for x in range(max(0, rect.left), min(mask.get_size()[0], rect.right)):
+    # iterate only over the intersection between rect and the mask bounds
+    mw, mh = mask.get_size()
+    x0 = max(0, rect.left)
+    y0 = max(0, rect.top)
+    x1 = min(mw, rect.right)
+    y1 = min(mh, rect.bottom)
+    for y in range(y0, y1):
+        for x in range(x0, x1):
             if mask.get_at((x, y)):
                 return True
     return False
@@ -72,6 +74,10 @@ def main():
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption("Pixel Maze Duel")
     clock = pygame.time.Clock()
+
+    # keep keyboard focus so get_pressed() works after clicks
+    pygame.event.set_grab(True)
+    pygame.mouse.set_visible(True)
 
     # 背景
     bg = pygame.image.load(BG_PATH).convert()
@@ -88,10 +94,19 @@ def main():
     wall_mask = build_wall_mask(bg)
 
     # Re-identify black lines in hay_wall.png as collision areas
-    hay_wall_img = pygame.image.load("maze/assets/hay_wall.png").convert()
-    HAY_RGB = (0, 0, 0)  # Black color for collision
-    HAY_TOL = (30, 30, 30)  # Tolerance for black detection
-    hay_wall_mask = pygame.mask.from_threshold(hay_wall_img, HAY_RGB, HAY_TOL)
+    # load with alpha so transparent background stays transparent
+    hay_wall_img = pygame.image.load("maze/assets/hay_wall.png").convert_alpha()
+    # build mask from non‑transparent pixels (the thin black lines)
+    hay_wall_mask = pygame.mask.from_surface(hay_wall_img)
+
+    # --- Debug: draw mask overlay (red semi-transparent) so we can see collision areas ---
+    hay_debug_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    w_m, h_m = hay_wall_mask.get_size()
+    for y in range(h_m):
+        for x in range(w_m):
+            if hay_wall_mask.get_at((x, y)):
+                hay_debug_surf.set_at((x, y), (255, 0, 0, 150))
+    screen.blit(hay_debug_surf, (0, 0))
 
     # Debugging wall_mask generation
     wall_pixel_count = sum(sum(row) for row in wall_mask)
@@ -118,6 +133,15 @@ def main():
     blue_x, blue_y = BLUE_START
     red_x, red_y = RED_START
 
+    # Debug: inspect hay_wall_mask near player starts
+    print(f"[DEBUG] hay_wall_mask.size={hay_wall_mask.get_size()} count={hay_wall_mask.count()}")
+    bx = int(blue_x + PLAYER_SIZE // 2)
+    by = int(blue_y + PLAYER_SIZE // 2)
+    rx = int(red_x + PLAYER_SIZE // 2)
+    ry = int(red_y + PLAYER_SIZE // 2)
+    print(f"[DEBUG] hay_at_blue_center={hay_wall_mask.get_at((bx, by))} at ({bx},{by})")
+    print(f"[DEBUG] hay_at_red_center={hay_wall_mask.get_at((rx, ry))} at ({rx},{ry})")
+
     start_ticks = pygame.time.get_ticks()
     font = pygame.font.SysFont("arial", 28, True)
     small_font = pygame.font.SysFont("arial", 20, True)
@@ -140,6 +164,9 @@ def main():
                     red_x, red_y = RED_START
                     start_ticks = pygame.time.get_ticks()
                     winner = None
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                # re-grab input if user clicked away and came back
+                pygame.event.set_grab(True)
 
         keys = pygame.key.get_pressed()
 
@@ -157,14 +184,16 @@ def main():
 
             blue_rect = pygame.Rect(int(blue_x), int(blue_y), PLAYER_SIZE, PLAYER_SIZE)
             blue_rect.clamp_ip(pygame.Rect(0, 0, WIDTH, HEIGHT))
+            # keep float position synced with the potentially clamped rect
+            blue_x, blue_y = float(blue_rect.left), float(blue_rect.top)
             if rect_hits_wall(blue_rect, hay_wall_mask):
                 # 撞墙回退
                 blue_x, blue_y = old_bx, old_by
                 blue_rect.topleft = (int(blue_x), int(blue_y))
 
-            # Debugging blue player movement
-            print(f"[DEBUG] Blue position: ({blue_x}, {blue_y})")
-            print(f"[DEBUG] Blue collision: {rect_hits_wall(blue_rect, hay_wall_mask)}")
+            # remove noisy per-frame prints (use logging only on collisions or state change)
+            if rect_hits_wall(blue_rect, hay_wall_mask):
+                print(f"[DEBUG] Blue collided at ({blue_x},{blue_y})")
 
             # ---------- 红玩家移动 (方向键) ----------
             old_rx, old_ry = red_x, red_y
@@ -179,14 +208,15 @@ def main():
 
             red_rect = pygame.Rect(int(red_x), int(red_y), PLAYER_SIZE, PLAYER_SIZE)
             red_rect.clamp_ip(pygame.Rect(0, 0, WIDTH, HEIGHT))
+            # keep float position synced with the potentially clamped rect
+            red_x, red_y = float(red_rect.left), float(red_rect.top)
             if rect_hits_wall(red_rect, hay_wall_mask):
                 # 撞墙回退
                 red_x, red_y = old_rx, old_ry
                 red_rect.topleft = (int(red_x), int(red_y))
 
-            # Debugging red player movement
-            print(f"[DEBUG] Red position: ({red_x}, {red_y})")
-            print(f"[DEBUG] Red collision: {rect_hits_wall(red_rect, hay_wall_mask)}")
+            if rect_hits_wall(red_rect, hay_wall_mask):
+                print(f"[DEBUG] Red collided at ({red_x},{red_y})")
 
             # ---------- 判胜 ----------
             if blue_rect.colliderect(FLAG_RECT):
@@ -262,10 +292,6 @@ def main():
     sys.exit()
 
 
-if __name__ == "__main__":
-    main()
-
-
 def is_hay(rgb):
     r,g,b = rgb
     h,s,v = colorsys.rgb_to_hsv(r/255, g/255, b/255)
@@ -277,7 +303,7 @@ def is_hay(rgb):
         return True
     return False
 
-def main():
+def build_level():
     p = Path(IMG)
     if not p.exists():
         raise SystemExit(f"not found: {p}")
@@ -306,6 +332,9 @@ def main():
     # 预览前5行
     for ln in lines[:5]:
         print(ln)
+
+# Note: we removed the bottom "if __name__ == '__main__': main()" so the game main() remains the entrypoint.
+# To generate the level file manually, call build_level() from a separate script or an interactive session.
 
 if __name__ == "__main__":
     main()
