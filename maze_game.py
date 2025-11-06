@@ -14,9 +14,9 @@ BG_PATH = "maze/assets/background_maze.png"
 BLUE_PATH = "maze/assets/blue_player.png"
 RED_PATH = "maze/assets/red_player.png"
 
-# 你图上的起点
-BLUE_START = (200, 200)  # New position for blue player
-RED_START = (700, 300)  # New position for red player
+# 你图上的起点 — 蓝在左上、红在左下（带一点内边距）
+BLUE_START = (20, 20)
+RED_START = (20, 428)  # HEIGHT(480) - PLAYER_SIZE(32) - 20 = 428
 
 # 终点/旗子区域（终点区域）
 END_ZONE = pygame.Rect(745, 160, 50, 80)
