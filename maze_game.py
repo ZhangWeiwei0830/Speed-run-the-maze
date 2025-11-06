@@ -3,6 +3,7 @@ import sys
 from PIL import Image
 from pathlib import Path
 import colorsys
+import random
 
 # ------------ 基础设置 ------------
 WIDTH, HEIGHT = 800, 480
@@ -13,14 +14,16 @@ BG_PATH = "maze/assets/background_maze.png"
 BLUE_PATH = "maze/assets/blue_player.png"
 RED_PATH = "maze/assets/red_player.png"
 
-# 你图上的起点
-BLUE_START = (200, 200)  # New position for blue player
-RED_START = (700, 300)  # New position for red player
+# 你图上的起点 — 蓝在左上、红在左下（带一点内边距）
+BLUE_START = (20, 20)
+RED_START = (20, 428)  # HEIGHT(480) - PLAYER_SIZE(32) - 20 = 428
 
-# 你图上右边红旗的位置（可以微调）
-FLAG_RECT = pygame.Rect(745, 160, 50, 80)
+# 终点/旗子区域（终点区域）
+END_ZONE = pygame.Rect(745, 160, 50, 80)
+# 兼容老代码变量名（可选）
+FLAG_RECT = END_ZONE
 
-PLAYER_SIZE = 48
+PLAYER_SIZE = 32
 PLAYER_SPEED = 2.4
 
 IMG = "maze/assets/background_maze.png"
@@ -56,12 +59,14 @@ def build_wall_mask(bg_surf):
 
 def rect_hits_wall(rect, mask):
     """玩家的矩形跟草垛有没有撞上"""
-    # Ensure coordinates are within bounds
-    if not (0 <= rect.left < mask.get_size()[0] and 0 <= rect.top < mask.get_size()[1]):
-        return False
-
-    for y in range(max(0, rect.top), min(mask.get_size()[1], rect.bottom)):
-        for x in range(max(0, rect.left), min(mask.get_size()[0], rect.right)):
+    # iterate only over the intersection between rect and the mask bounds
+    mw, mh = mask.get_size()
+    x0 = max(0, rect.left)
+    y0 = max(0, rect.top)
+    x1 = min(mw, rect.right)
+    y1 = min(mh, rect.bottom)
+    for y in range(y0, y1):
+        for x in range(x0, x1):
             if mask.get_at((x, y)):
                 return True
     return False
@@ -73,8 +78,13 @@ def main():
     pygame.display.set_caption("Pixel Maze Duel")
     clock = pygame.time.Clock()
 
-    # 背景
-    bg = pygame.image.load(BG_PATH).convert()
+    # keep keyboard focus so get_pressed() works after clicks
+    pygame.event.set_grab(True)
+    pygame.mouse.set_visible(True)
+
+    # 背景: removed external image, use a plain solid color so only characters remain
+    bg = pygame.Surface((WIDTH, HEIGHT))
+    bg.fill((30, 120, 30))  # plain "grass" color
 
     # 玩家贴图
     blue_img = pygame.transform.smoothscale(
@@ -84,27 +94,106 @@ def main():
         pygame.image.load(RED_PATH).convert_alpha(), (PLAYER_SIZE, PLAYER_SIZE)
     )
 
-    # 从背景生成墙体遮罩
-    wall_mask = build_wall_mask(bg)
+    # No hay_wall asset — use an empty mask so no wall collisions occur
+    hay_wall_mask = pygame.mask.Mask((WIDTH, HEIGHT))  # all False (no collisions)
 
-    # Re-identify black lines in hay_wall.png as collision areas
-    hay_wall_img = pygame.image.load("maze/assets/hay_wall.png").convert()
-    HAY_RGB = (0, 0, 0)  # Black color for collision
-    HAY_TOL = (30, 30, 30)  # Tolerance for black detection
-    hay_wall_mask = pygame.mask.from_threshold(hay_wall_img, HAY_RGB, HAY_TOL)
+    # Colors
+    OBSTACLE_COLOR = (120, 80, 40)   # brown block color
+    END_ZONE_COLOR = (255, 204, 0)   # gold for the end/flag
+    END_ZONE_BORDER = (200, 140, 0)
 
-    # Debugging wall_mask generation
-    wall_pixel_count = sum(sum(row) for row in wall_mask)
-    print(f"[DEBUG] Wall mask pixel count: {wall_pixel_count}")
+    # --- Maze generator: perfect maze (recursive backtracker) with 40x40 cells ---
+    def generate_obstacles(cell=40, passage_expand=0):
+        """Produce a perfect maze where each tile is `cell`×`cell` pixels.
+        We use an expanded visual grid where odd indices are passage centers and
+        carving moves by 2 tiles so walls remain aligned to the `cell` grid.
+        `passage_expand` = number of dilation iterations to widen passages (0 = 1-cell wide).
+        Returns list of pygame.Rect wall blocks (cell-aligned).
+        """
+        visual_cols = WIDTH // cell
+        visual_rows = HEIGHT // cell
 
-    # Visualize wall_mask for debugging
-    debug_surf = pygame.Surface((WIDTH, HEIGHT))
-    debug_surf.set_colorkey((0, 0, 0))
-    for y, row in enumerate(wall_mask):
-        for x, is_wall in enumerate(row):
-            if is_wall:
-                debug_surf.set_at((x, y), (255, 0, 0))
-    screen.blit(debug_surf, (0, 0))
+        # ensure at least a 3x3 visual grid
+        visual_cols = max(3, visual_cols)
+        visual_rows = max(3, visual_rows)
+
+        # map pixel pos to visual tile coords
+        def pos_to_tile(pos):
+            x, y = pos
+            tx = min(visual_cols - 1, max(0, x // cell))
+            ty = min(visual_rows - 1, max(0, y // cell))
+            return tx, ty
+
+        start_tile = pos_to_tile(BLUE_START)
+        end_tile = pos_to_tile(END_ZONE.center)
+
+        # visual grid: True = wall, False = passage
+        grid = [[True for _ in range(visual_rows)] for _ in range(visual_cols)]
+
+        # convert to "carvable" coordinates where passages are at odd indices:
+        def to_carve(tile):
+            tx, ty = tile
+            # clamp and map to odd coordinate (1,3,5,...)
+            cx = min(visual_cols - 1, max(1, tx | 1))
+            cy = min(visual_rows - 1, max(1, ty | 1))
+            return cx, cy
+
+        sx, sy = to_carve(start_tile)
+        ex, ey = to_carve(end_tile)
+
+        # carve with recursive backtracker stepping by 2 tiles
+        dirs = [(2, 0), (-2, 0), (0, 2), (0, -2)]
+        stack = [(sx, sy)]
+        grid[sx][sy] = False
+        while stack:
+            cx, cy = stack[-1]
+            neighbors = []
+            for dx, dy in dirs:
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < visual_cols and 0 <= ny < visual_rows and grid[nx][ny]:
+                    neighbors.append((nx, ny))
+            if neighbors:
+                nx, ny = random.choice(neighbors)
+                # remove wall between
+                wx, wy = (cx + nx) // 2, (cy + ny) // 2
+                grid[wx][wy] = False
+                grid[nx][ny] = False
+                stack.append((nx, ny))
+            else:
+                stack.pop()
+
+        # ensure end is passage
+        grid[ex][ey] = False
+
+        # optionally expand passages by converting adjacent wall tiles into passages
+        for _ in range(max(0, passage_expand)):
+            new_grid = [row[:] for row in grid]
+            for tx in range(visual_cols):
+                for ty in range(visual_rows):
+                    if grid[tx][ty]:
+                        # if any 4-neighbor is passage, convert this wall to passage
+                        neighbors = [(tx+1,ty),(tx-1,ty),(tx,ty+1),(tx,ty-1)]
+                        if any(0 <= nx < visual_cols and 0 <= ny < visual_rows and not grid[nx][ny] for nx,ny in neighbors):
+                            new_grid[tx][ty] = False
+            grid = new_grid
+
+        # convert True tiles to obstacle rects
+        obs = []
+        for tx in range(visual_cols):
+            for ty in range(visual_rows):
+                if grid[tx][ty]:
+                    obs.append(pygame.Rect(tx * cell, ty * cell, cell, cell))
+
+        # remove any obstacles overlapping start/red or end
+        start_rect = pygame.Rect(BLUE_START[0], BLUE_START[1], PLAYER_SIZE, PLAYER_SIZE)
+        red_rect = pygame.Rect(RED_START[0], RED_START[1], PLAYER_SIZE, PLAYER_SIZE)
+        safe_obs = [r for r in obs if not r.colliderect(start_rect)
+                    and not r.colliderect(red_rect)
+                    and not r.colliderect(END_ZONE)]
+        return safe_obs
+
+    # initial maze: 40×40 tiles, 1-cell-wide passages (passage_expand=0)
+    OBSTACLES = generate_obstacles(cell=40, passage_expand=0)
 
     # ✅ 盖掉背景里"画死的那两个大人"
     # 这两个矩形是我根据你截图估的，如果没盖干净，你就改这两个 rect 的位置 / 尺寸
@@ -140,6 +229,11 @@ def main():
                     red_x, red_y = RED_START
                     start_ticks = pygame.time.get_ticks()
                     winner = None
+                    # regenerate a fresh random maze on restart
+                    OBSTACLES = generate_obstacles(cell=40, passage_expand=0)
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                # re-grab input if user clicked away and came back
+                pygame.event.set_grab(True)
 
         keys = pygame.key.get_pressed()
 
@@ -157,14 +251,16 @@ def main():
 
             blue_rect = pygame.Rect(int(blue_x), int(blue_y), PLAYER_SIZE, PLAYER_SIZE)
             blue_rect.clamp_ip(pygame.Rect(0, 0, WIDTH, HEIGHT))
-            if rect_hits_wall(blue_rect, hay_wall_mask):
-                # 撞墙回退
+            # keep float position synced with the potentially clamped rect
+            blue_x, blue_y = float(blue_rect.left), float(blue_rect.top)
+            # obstacle collision (rect-based)
+            if blue_rect.collidelist(OBSTACLES) != -1:
                 blue_x, blue_y = old_bx, old_by
                 blue_rect.topleft = (int(blue_x), int(blue_y))
 
-            # Debugging blue player movement
-            print(f"[DEBUG] Blue position: ({blue_x}, {blue_y})")
-            print(f"[DEBUG] Blue collision: {rect_hits_wall(blue_rect, hay_wall_mask)}")
+            # remove noisy per-frame prints (use logging only on collisions or state change)
+            if rect_hits_wall(blue_rect, hay_wall_mask):
+                print(f"[DEBUG] Blue collided at ({blue_x},{blue_y})")
 
             # ---------- 红玩家移动 (方向键) ----------
             old_rx, old_ry = red_x, red_y
@@ -179,19 +275,20 @@ def main():
 
             red_rect = pygame.Rect(int(red_x), int(red_y), PLAYER_SIZE, PLAYER_SIZE)
             red_rect.clamp_ip(pygame.Rect(0, 0, WIDTH, HEIGHT))
-            if rect_hits_wall(red_rect, hay_wall_mask):
-                # 撞墙回退
+            # keep float position synced with the potentially clamped rect
+            red_x, red_y = float(red_rect.left), float(red_rect.top)
+            # obstacle collision (rect-based)
+            if red_rect.collidelist(OBSTACLES) != -1:
                 red_x, red_y = old_rx, old_ry
                 red_rect.topleft = (int(red_x), int(red_y))
 
-            # Debugging red player movement
-            print(f"[DEBUG] Red position: ({red_x}, {red_y})")
-            print(f"[DEBUG] Red collision: {rect_hits_wall(red_rect, hay_wall_mask)}")
+            if rect_hits_wall(red_rect, hay_wall_mask):
+                print(f"[DEBUG] Red collided at ({red_x},{red_y})")
 
             # ---------- 判胜 ----------
-            if blue_rect.colliderect(FLAG_RECT):
+            if blue_rect.colliderect(END_ZONE):
                 winner = "A (Blue)"
-            elif red_rect.colliderect(FLAG_RECT):
+            elif red_rect.colliderect(END_ZONE):
                 winner = "B (Red)"
 
             # ---------- 判时间 ----------
@@ -218,6 +315,15 @@ def main():
         pygame.draw.rect(screen, grass_color, cover_blue)
         pygame.draw.rect(screen, grass_color, cover_red)
 
+        # Draw obstacles (blocks)
+        for r in OBSTACLES:
+            pygame.draw.rect(screen, OBSTACLE_COLOR, r)
+            pygame.draw.rect(screen, (0,0,0), r, 2)
+
+        # Draw end zone / flag
+        pygame.draw.rect(screen, END_ZONE_COLOR, END_ZONE)
+        pygame.draw.rect(screen, END_ZONE_BORDER, END_ZONE, 3)
+
         # 计时器
         elapsed = (pygame.time.get_ticks() - start_ticks) // 1000
         remaining = max(0, TIMER_SECONDS - elapsed)
@@ -238,32 +344,10 @@ def main():
             w_surf = font.render(f"Winner: {winner}", True, (255, 204, 0))
             screen.blit(w_surf, (WIDTH // 2 - w_surf.get_width() // 2, HEIGHT - 60))
 
-        # Commented out visualization of hay_wall_mask to resolve green screen issue
-        # hay_debug_surf = pygame.Surface((WIDTH, HEIGHT))
-        # hay_debug_surf.set_colorkey((0, 0, 0))
-        # for y in range(hay_wall_mask.get_size()[1]):
-        #     for x in range(hay_wall_mask.get_size()[0]):
-        #         if hay_wall_mask.get_at((x, y)):
-        #             hay_debug_surf.set_at((x, y), (0, 255, 0))  # Green for hay wall
-        # screen.blit(hay_debug_surf, (0, 0))
-
-        # Debugging collision mask visualization
-        # collision_debug_surf = pygame.Surface((WIDTH, HEIGHT))
-        # collision_debug_surf.set_colorkey((0, 0, 0))
-        # for y in range(hay_wall_mask.get_size()[1]):
-        #     for x in range(hay_wall_mask.get_size()[0]):
-        #         if hay_wall_mask.get_at((x, y)):
-        #             collision_debug_surf.set_at((x, y), (255, 0, 0))  # Red for collision areas
-        # screen.blit(collision_debug_surf, (0, 0))
-
         pygame.display.flip()
 
     pygame.quit()
     sys.exit()
-
-
-if __name__ == "__main__":
-    main()
 
 
 def is_hay(rgb):
@@ -277,7 +361,7 @@ def is_hay(rgb):
         return True
     return False
 
-def main():
+def build_level():
     p = Path(IMG)
     if not p.exists():
         raise SystemExit(f"not found: {p}")
@@ -306,6 +390,9 @@ def main():
     # 预览前5行
     for ln in lines[:5]:
         print(ln)
+
+# Note: we removed the bottom "if __name__ == '__main__': main()" so the game main() remains the entrypoint.
+# To generate the level file manually, call build_level() from a separate script or an interactive session.
 
 if __name__ == "__main__":
     main()
